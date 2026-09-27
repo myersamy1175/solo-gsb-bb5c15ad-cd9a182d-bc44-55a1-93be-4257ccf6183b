@@ -16,29 +16,48 @@ export function buildSegments(
   textLength: number,
   intervals: Interval[],
 ): TextSegment[] {
-  const points = new Set<number>([0, textLength])
-  for (const iv of intervals) {
-    if (iv.start >= 0 && iv.end <= textLength && iv.end > iv.start) {
-      points.add(iv.start)
-      points.add(iv.end)
+  // 忽略空区间与越界区间；valid 保持输入顺序，段内标注 ID 顺序与之对应
+  const valid = intervals.filter(
+    (iv) => iv.start >= 0 && iv.end <= textLength && iv.end > iv.start,
+  )
+
+  // 端点事件扫描：同一位置上先处理结束、再处理开始（半开区间 [start,end)，
+  // 端点相接处旧标注退出与新标注进入相抵，不会出现在同一段里）
+  const events: Array<{ pos: number; type: 'end' | 'start'; idx: number }> = []
+  for (let i = 0; i < valid.length; i++) {
+    events.push({ pos: valid[i].end, type: 'end', idx: i })
+    events.push({ pos: valid[i].start, type: 'start', idx: i })
+  }
+  events.sort((x, y) => x.pos - y.pos || (x.type === 'end' ? -1 : 1))
+
+  const segments: TextSegment[] = []
+  const active = new Set<number>() // 覆盖当前扫描位置的 valid 下标
+  let eventIdx = 0
+  let pos = 0
+
+  const emit = (end: number) => {
+    if (end <= pos) return
+    // 按下标排序即还原输入顺序：颜色叠加与点击检查的行为与逐段过滤一致
+    const annotationIds = [...active].sort((a, b) => a - b).map((i) => valid[i].id)
+    segments.push({ start: pos, end, annotationIds })
+  }
+
+  // 事件只随端点推进，活动集合增量维护，避免每段重新全量扫描所有区间
+  while (eventIdx < events.length) {
+    const p = events[eventIdx].pos
+    emit(p)
+    pos = p
+    // 处理完同一位置的全部事件（先 end 后 start）再前进
+    while (eventIdx < events.length && events[eventIdx].pos === p) {
+      const ev = events[eventIdx]
+      if (ev.type === 'end') active.delete(ev.idx)
+      else active.add(ev.idx)
+      eventIdx += 1
     }
   }
-  const sorted = [...points].sort((a, b) => a - b)
-  const segments: TextSegment[] = segmentsFromPoints(sorted, intervals)
-  return segments.filter((s) => s.end > s.start)
-}
+  emit(textLength)
 
-function segmentsFromPoints(points: number[], intervals: Interval[]): TextSegment[] {
-  const out: TextSegment[] = []
-  for (let i = 0; i < points.length - 1; i++) {
-    const start = points[i]
-    const end = points[i + 1]
-    const ids = intervals
-      .filter((iv) => iv.start <= start && end <= iv.end)
-      .map((iv) => iv.id)
-    out.push({ start, end, annotationIds: ids })
-  }
-  return out
+  return segments
 }
 
 // ---------- 颜色混合 ----------
