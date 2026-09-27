@@ -47,6 +47,96 @@ check('buildSegments：无标注时为整段；空区间被忽略', () => {
   assert.deepStrictEqual(segs[0].annotationIds, [])
 })
 
+check('buildSegments：端点相接按半开区间处理，不产生叠加也不留空段', () => {
+  // [0,3) 与 [3,6) 相接：同位置的结束与开始事件相抵
+  const segs = buildSegments(6, [
+    { start: 0, end: 3, id: 'a' },
+    { start: 3, end: 6, id: 'b' },
+  ])
+  assert.deepStrictEqual(
+    segs.map((s) => [s.start, s.end, s.annotationIds]),
+    [
+      [0, 3, ['a']],
+      [3, 6, ['b']],
+    ],
+  )
+})
+
+check('buildSegments：越界区间（含负值与超出文末）被忽略', () => {
+  const segs = buildSegments(5, [
+    { start: -1, end: 3, id: 'neg' },
+    { start: 2, end: 6, id: 'over' },
+    { start: 6, end: 8, id: 'outside' },
+    { start: 1, end: 4, id: 'ok' },
+  ])
+  const rejoined = segs.map((s) => [s.start, s.end]).join('|')
+  assert.ok(rejoined.startsWith('0,1|'), `应完整覆盖原文开头：${rejoined}`)
+  assert.ok(rejoined.endsWith('|4,5'), `应完整覆盖原文末尾：${rejoined}`)
+  assert.deepStrictEqual(
+    segs.map((s) => [s.start, s.end, s.annotationIds] as [number, number, string[]]),
+    [
+      [0, 1, []],
+      [1, 4, ['ok']],
+      [4, 5, []],
+    ],
+  )
+})
+
+check('buildSegments：段内标注 ID 保持输入顺序（含乱序与嵌套）', () => {
+  // 旧的逐段 filter 行为：按 intervals 数组顺序收集 ID
+  const segs = buildSegments(10, [
+    { start: 4, end: 9, id: 'b' }, // 先输入的外层区间
+    { start: 2, end: 8, id: 'a' }, // 后输入、起点更早的区间
+    { start: 5, end: 6, id: 'c' },
+  ])
+  const idsAt = (s: number) => segs.find((seg) => seg.start === s)!.annotationIds
+  assert.deepStrictEqual(idsAt(2), ['a'])
+  assert.deepStrictEqual(idsAt(4), ['b', 'a']) // 重叠处保持输入顺序而非起点顺序
+  assert.deepStrictEqual(idsAt(5), ['b', 'a', 'c'])
+  assert.deepStrictEqual(idsAt(6), ['b', 'a'])
+  assert.deepStrictEqual(idsAt(8), ['b'])
+})
+
+check('buildSegments：原文为空时结果为空数组', () => {
+  assert.deepStrictEqual(buildSegments(0, []), [])
+})
+
+check('buildSegments：大量短标注下分段完整覆盖且与朴素切片结果一致', () => {
+  const n = 2000
+  const textLength = n * 2
+  // 密集短区间：相邻相接 + 部分重叠，端点全部为整数
+  const intervals = []
+  for (let i = 0; i < n; i++) {
+    intervals.push({ start: i * 2 % textLength, end: (i * 2 + 3) % (textLength + 1), id: `a${i}` })
+  }
+  const valid = intervals.filter((iv) => iv.start >= 0 && iv.end <= textLength && iv.end > iv.start)
+  const segs = buildSegments(textLength, valid)
+
+  // 首尾相接、无空洞、无空段、拼回 [0, textLength)
+  assert.strictEqual(segs[0].start, 0)
+  assert.strictEqual(segs[segs.length - 1].end, textLength)
+  for (let i = 1; i < segs.length; i++) assert.strictEqual(segs[i].start, segs[i - 1].end)
+  assert.ok(segs.every((s) => s.end > s.start))
+
+  // 与朴素逐段全量扫描在每段 ID 集合与顺序上完全一致
+  const points = new Set<number>([0, textLength])
+  for (const iv of valid) {
+    points.add(iv.start)
+    points.add(iv.end)
+  }
+  const sorted = [...points].sort((x, y) => x - y)
+  let segIdx = 0
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const expectIds = valid
+      .filter((iv) => iv.start <= sorted[i] && sorted[i + 1] <= iv.end)
+      .map((iv) => iv.id)
+    const seg = segs[segIdx++]
+    assert.strictEqual(seg.start, sorted[i])
+    assert.strictEqual(seg.end, sorted[i + 1])
+    assert.deepStrictEqual(seg.annotationIds, expectIds)
+  }
+})
+
 // ---------- jsdom：选区偏移往返 ----------
 
 const dom = new JSDOM('<!doctype html><body><article id="root"></article></body>')
